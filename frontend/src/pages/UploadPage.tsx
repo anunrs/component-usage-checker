@@ -36,9 +36,15 @@ export default function UploadPage() {
     <Layout>
       <div className="max-w-lg mx-auto">
         <h1 className="text-2xl font-semibold text-zinc-100 mb-1">New Scan</h1>
-        <p className="text-sm text-zinc-500 mb-8">
-          Upload a zip of your React + TypeScript project and we'll map every component.
+        <p className="text-sm text-zinc-500 mb-2">
+          Zip your project's <span className="font-mono text-zinc-400">src/</span> folder and upload it — we'll map every component.
         </p>
+        <div className="bg-zinc-900 border border-zinc-800 rounded-lg px-4 py-3 mb-8 text-xs text-zinc-500 leading-relaxed">
+          <span className="text-zinc-400 font-medium">How to zip correctly:</span> right-click your{" "}
+          <span className="font-mono text-zinc-400">src/</span> folder → Compress (Mac) or Send to → Compressed folder (Windows).
+          Do <span className="text-zinc-300">not</span> zip the whole project — that includes{" "}
+          <span className="font-mono">node_modules</span> and will be too large to upload.
+        </div>
 
         {error && (
           <div className="bg-red-950 border border-red-900 text-red-400 text-sm rounded-xl px-4 py-3 mb-6">
@@ -86,14 +92,27 @@ export default function UploadPage() {
                     </svg>
                   </div>
                   <p className="text-sm text-zinc-400 font-medium">Click to select a zip file</p>
-                  <p className="text-xs text-zinc-600 mt-0.5">.zip files only</p>
+                  <p className="text-xs text-zinc-600 mt-0.5">.zip only · max 4 MB · zip your src/ folder</p>
                 </div>
               )}
               <input
                 type="file"
                 accept=".zip"
                 className="hidden"
-                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                onChange={(e) => {
+                  const picked = e.target.files?.[0] ?? null;
+                  if (picked && picked.size > 4 * 1024 * 1024) {
+                    setError(
+                      `File is ${(picked.size / 1024 / 1024).toFixed(0)} MB — the limit is 4 MB. ` +
+                      "Please zip only your src/ folder, not the whole project."
+                    );
+                    setFile(null);
+                    e.target.value = "";
+                    return;
+                  }
+                  setError("");
+                  setFile(picked);
+                }}
                 required
               />
             </label>
