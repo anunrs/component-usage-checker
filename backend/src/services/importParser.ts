@@ -1,9 +1,12 @@
 // importParser.ts
 // Given the text content of a single file, finds all local import statements
 // (imports from ./ or ../ paths — not from node_modules).
-// Returns a list of component names that are imported in this file.
+// Returns a list of component names (PascalCase) that are imported in this file.
 
-const IMPORT_PATTERN = /import\s+(?:(\w+)|(?:\{([^}]+)\}))\s+from\s+['"]([^'"]+)['"]/g;
+// Captures the entire import clause + source path.
+// [^'"]+? matches across newlines so multi-line imports work.
+// The leading (type\s+)? detects "import type { ... }" blocks to skip them.
+const IMPORT_PATTERN = /import\s+(type\s+)?([^'"]+?)\s+from\s+['"]([^'"]+)['"]/g;
 
 export function parseImports(content: string): string[] {
   const importedComponents: string[] = [];
@@ -11,23 +14,38 @@ export function parseImports(content: string): string[] {
   let match: RegExpExecArray | null;
 
   while ((match = IMPORT_PATTERN.exec(content)) !== null) {
-    const source = match[3]; // the "from" path e.g. "../components/Button"
+    const isTypeOnlyImport = !!match[1]; // "import type { ... }" — skip entirely
+    const importClause     = match[2];   // everything between "import [type]" and "from"
+    const source           = match[3];   // the path string
 
-    // Only care about local imports
+    if (isTypeOnlyImport) continue;
     if (!source.startsWith("./") && !source.startsWith("../")) continue;
 
-    const defaultImport = match[1];  // e.g. import Button from "..."
-    const namedImports = match[2];   // e.g. import { Button, Modal } from "..."
-
-    if (defaultImport && /^[A-Z]/.test(defaultImport)) {
-      importedComponents.push(defaultImport);
+    // ── Default import ────────────────────────────────────────────────────────
+    // Strip the named-import block to isolate the default identifier.
+    // "Button, { IconLeft }" → "Button"
+    // "{ Button }"           → "" (no default)
+    const withoutNamed = importClause.replace(/\{[^}]*\}/, "").replace(/,/g, "").trim();
+    if (withoutNamed && /^[A-Z]/.test(withoutNamed)) {
+      importedComponents.push(withoutNamed);
     }
 
-    if (namedImports) {
-      const names = namedImports.split(",").map((n) => n.trim());
+    // ── Named imports ─────────────────────────────────────────────────────────
+    // Handles: { Button, Modal }
+    //          { Button as Btn }          → record original name "Button"
+    //          { type ButtonProps, Btn }  → skip "type ButtonProps", record "Btn"
+    const namedBlock = importClause.match(/\{([^}]+)\}/);
+    if (namedBlock) {
+      const names = namedBlock[1].split(",").map((n) => n.trim()).filter(Boolean);
       for (const name of names) {
-        if (/^[A-Z]/.test(name)) {
-          importedComponents.push(name);
+        // Strip inline type keyword: "type ButtonProps" → skip
+        if (name === "type" || name.startsWith("type ")) continue;
+
+        // Handle alias: "Button as Btn" → use "Button" (the export name)
+        const originalName = name.split(/\s+as\s+/)[0].trim();
+
+        if (/^[A-Z]/.test(originalName)) {
+          importedComponents.push(originalName);
         }
       }
     }
