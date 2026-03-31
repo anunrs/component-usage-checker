@@ -1,8 +1,9 @@
 // UsageTag — pill badge for a component's usage label
 
-type Label = "unused" | "rarely-used" | "normal" | "core";
+type Label = "unused" | "rarely-used" | "normal" | "core" | "unreachable";
 
 const STYLES: Record<Label, string> = {
+  unreachable:   "bg-violet-950 text-violet-400 ring-1 ring-violet-900",
   unused:        "bg-red-950 text-red-400 ring-1 ring-red-900",
   "rarely-used": "bg-amber-950 text-amber-400 ring-1 ring-amber-900",
   normal:        "bg-sky-950 text-sky-400 ring-1 ring-sky-900",
@@ -10,10 +11,11 @@ const STYLES: Record<Label, string> = {
 };
 
 const LABELS: Record<Label, string> = {
-  unused: "Unused",
+  unreachable:   "Unreachable",
+  unused:        "Unused",
   "rarely-used": "Rarely used",
-  normal: "Normal",
-  core: "Core",
+  normal:        "Normal",
+  core:          "Core",
 };
 
 export default function UsageTag({ label }: { label: Label }) {

@@ -37,4 +37,5 @@ model Component {
   definedIn   String
   usageCount  Int      @default(0)
   usedIn      Json
+  reachable   Boolean  @default(true)
 }

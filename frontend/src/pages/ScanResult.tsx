@@ -6,7 +6,7 @@ import client from "../api/client";
 import ComponentCard from "../components/ComponentCard";
 import Layout from "../components/Layout";
 
-type Label = "unused" | "rarely-used" | "normal" | "core";
+type Label = "unused" | "rarely-used" | "normal" | "core" | "unreachable";
 
 interface Component {
   id: string;
@@ -14,6 +14,7 @@ interface Component {
   definedIn: string;
   usageCount: number;
   usedIn: string[];
+  reachable?: boolean; // optional: old scan records won't have this field
 }
 
 interface Scan {
@@ -23,14 +24,24 @@ interface Scan {
   components: Component[];
 }
 
-function getLabel(count: number): Label {
+// Reachability takes priority: an unreachable component is labelled "unreachable"
+// regardless of its import count, since it's dead code.
+// Old scans without the reachable field default conservatively to reachable = true.
+function getLabel(count: number, reachable: boolean = true): Label {
+  if (!reachable) return "unreachable";
   if (count === 0) return "unused";
   if (count === 1) return "rarely-used";
-  if (count >= 5) return "core";
+  if (count >= 5)  return "core";
   return "normal";
 }
 
-const SECTION_CONFIG: { key: Label; title: string; accent: string; statStyle: string }[] = [
+const SECTION_CONFIG: {
+  key: Label;
+  title: string;
+  accent: string;
+  statStyle: string;
+}[] = [
+  { key: "unreachable", title: "Unreachable", accent: "text-violet-400",  statStyle: "bg-violet-950 text-violet-400 ring-1 ring-violet-900" },
   { key: "unused",      title: "Unused",      accent: "text-red-400",     statStyle: "bg-red-950 text-red-400 ring-1 ring-red-900" },
   { key: "rarely-used", title: "Rarely Used", accent: "text-amber-400",   statStyle: "bg-amber-950 text-amber-400 ring-1 ring-amber-900" },
   { key: "normal",      title: "Normal",      accent: "text-sky-400",     statStyle: "bg-sky-950 text-sky-400 ring-1 ring-sky-900" },
@@ -39,7 +50,7 @@ const SECTION_CONFIG: { key: Label; title: string; accent: string; statStyle: st
 
 export default function ScanResult() {
   const { id } = useParams<{ id: string }>();
-  const [scan, setScan] = useState<Scan | null>(null);
+  const [scan, setScan]   = useState<Scan | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -65,8 +76,8 @@ export default function ScanResult() {
         <div className="space-y-4 animate-pulse">
           <div className="h-7 bg-zinc-800 rounded w-1/4" />
           <div className="h-4 bg-zinc-800 rounded w-1/6" />
-          <div className="grid grid-cols-4 gap-3 mt-8">
-            {[1,2,3,4].map(i => <div key={i} className="h-20 bg-zinc-900 rounded-xl border border-zinc-800" />)}
+          <div className="grid grid-cols-5 gap-3 mt-8">
+            {[1,2,3,4,5].map(i => <div key={i} className="h-20 bg-zinc-900 rounded-xl border border-zinc-800" />)}
           </div>
           <div className="grid grid-cols-2 gap-4 mt-6">
             {[1,2,3,4].map(i => <div key={i} className="h-32 bg-zinc-900 rounded-xl border border-zinc-800" />)}
@@ -78,8 +89,14 @@ export default function ScanResult() {
 
   const grouped = SECTION_CONFIG.map((s) => ({
     ...s,
-    items: scan.components.filter((c) => getLabel(c.usageCount) === s.key),
+    items: scan.components.filter(
+      (c) => getLabel(c.usageCount, c.reachable) === s.key
+    ),
   }));
+
+  // Only show the stat tile for "unreachable" if at least one component is unreachable
+  const hasUnreachable = grouped.find((g) => g.key === "unreachable")!.items.length > 0;
+  const statTiles = grouped.filter((g) => g.key !== "unreachable" || hasUnreachable);
 
   return (
     <Layout>
@@ -98,9 +115,9 @@ export default function ScanResult() {
         <p className="text-sm text-zinc-500 mt-1">{scan.components.length} components found</p>
       </div>
 
-      {/* Stats row */}
-      <div className="grid grid-cols-4 gap-3 my-8">
-        {grouped.map(({ key, title, statStyle, items }) => (
+      {/* Stats row — adapts to 4 or 5 columns depending on whether unreachable exist */}
+      <div className={`grid gap-3 my-8 ${hasUnreachable ? "grid-cols-5" : "grid-cols-4"}`}>
+        {statTiles.map(({ key, title, statStyle, items }) => (
           <div key={key} className="bg-zinc-900 rounded-xl border border-zinc-800 p-4 text-center">
             <p className="text-2xl font-bold text-zinc-100">{items.length}</p>
             <span className={`inline-block text-xs font-medium px-2 py-0.5 rounded-full mt-1.5 ${statStyle}`}>
@@ -117,6 +134,11 @@ export default function ScanResult() {
             <div className="flex items-center gap-2 mb-4">
               <h2 className={`text-base font-semibold ${accent}`}>{title}</h2>
               <span className="text-sm text-zinc-600">({items.length})</span>
+              {key === "unreachable" && (
+                <span className="text-xs text-zinc-600 ml-1">
+                  — imported somewhere, but not reachable from the app entry point
+                </span>
+              )}
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {items.map((c) => (
@@ -126,7 +148,8 @@ export default function ScanResult() {
                   definedIn={c.definedIn}
                   usageCount={c.usageCount}
                   usedIn={c.usedIn}
-                  label={getLabel(c.usageCount)}
+                  label={getLabel(c.usageCount, c.reachable)}
+                  reachable={c.reachable ?? true}
                 />
               ))}
             </div>

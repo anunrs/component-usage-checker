@@ -12,6 +12,7 @@ export interface ComponentUsage {
   usedIn: string[];
   usageCount: number;
   label: "unused" | "rarely-used" | "normal" | "core";
+  reachable: boolean;
 }
 
 function getLabel(count: number): ComponentUsage["label"] {
@@ -21,7 +22,10 @@ function getLabel(count: number): ComponentUsage["label"] {
   return "normal";
 }
 
-export function buildUsageMap(files: ExtractedFile[]): ComponentUsage[] {
+export function buildUsageMap(
+  files: ExtractedFile[],
+  reachableFiles: Set<string> | null
+): ComponentUsage[] {
   // Step 1 — find every component definition across all files
   // Result: { "Button": "src/components/Button.tsx", ... }
   const definitions = new Map<string, string>();
@@ -58,6 +62,8 @@ export function buildUsageMap(files: ExtractedFile[]): ComponentUsage[] {
       usedIn,
       usageCount,
       label: getLabel(usageCount),
+      // null means no entry point found — default conservatively to true
+      reachable: reachableFiles === null ? true : reachableFiles.has(definedIn),
     });
   }
 

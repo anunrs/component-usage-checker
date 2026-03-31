@@ -10,6 +10,7 @@ import { authenticateToken, AuthRequest } from "../middleware/auth";
 import prisma from "../lib/prisma";
 import { extractZip } from "../services/zipExtractor";
 import { buildUsageMap } from "../services/usageBuilder";
+import { buildReachabilitySet } from "../services/graphBuilder";
 
 const router = Router();
 
@@ -60,7 +61,8 @@ router.post(
     try {
       // Run the scan pipeline
       const files = extractZip(req.file.path);
-      const components = buildUsageMap(files);
+      const reachableFiles = buildReachabilitySet(files);
+      const components = buildUsageMap(files, reachableFiles);
 
       // Save each component to the DB
       await prisma.component.createMany({
@@ -70,6 +72,7 @@ router.post(
           definedIn: c.definedIn,
           usageCount: c.usageCount,
           usedIn: c.usedIn,
+          reachable: c.reachable,
         })),
       });
 
