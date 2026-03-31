@@ -17,9 +17,12 @@ export function extractZip(zipFilePath: string): ExtractedFile[] {
   const results: ExtractedFile[] = [];
 
   for (const entry of entries) {
-    // Skip directories and any file that isn't .ts or .tsx
+    // Skip directories
     if (entry.isDirectory) continue;
+    // Skip non-TS files
     if (!entry.entryName.endsWith(".ts") && !entry.entryName.endsWith(".tsx")) continue;
+    // Skip declaration files — they contain type stubs, not component implementations
+    if (entry.entryName.endsWith(".d.ts")) continue;
     // Skip node_modules — we only care about the project's own source files
     if (entry.entryName.includes("node_modules")) continue;
 

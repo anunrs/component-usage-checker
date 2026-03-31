@@ -40,6 +40,7 @@ export default function UploadPage() {
       original.forEach((path, entry) => {
         if (entry.dir)                         return; // skip directories
         if (path.includes("node_modules"))     return; // skip deps
+        if (path.endsWith(".d.ts"))            return; // skip declaration files
         if (!path.endsWith(".ts") && !path.endsWith(".tsx")) return; // only TS
 
         tasks.push(

@@ -1,4 +1,4 @@
-// ScanResult — one scan's components grouped by label
+// ScanResult — one scan's components grouped by label, with collapsible sections
 
 import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
@@ -14,7 +14,7 @@ interface Component {
   definedIn: string;
   usageCount: number;
   usedIn: string[];
-  reachable?: boolean; // optional: old scan records won't have this field
+  reachable?: boolean;
 }
 
 interface Scan {
@@ -24,9 +24,6 @@ interface Scan {
   components: Component[];
 }
 
-// Reachability takes priority: an unreachable component is labelled "unreachable"
-// regardless of its import count, since it's dead code.
-// Old scans without the reachable field default conservatively to reachable = true.
 function getLabel(count: number, reachable: boolean = true): Label {
   if (!reachable) return "unreachable";
   if (count === 0) return "unused";
@@ -40,18 +37,43 @@ const SECTION_CONFIG: {
   title: string;
   accent: string;
   statStyle: string;
+  hint?: string;
 }[] = [
-  { key: "unreachable", title: "Unreachable", accent: "text-violet-400",  statStyle: "bg-violet-950 text-violet-400 ring-1 ring-violet-900" },
+  {
+    key: "unreachable",
+    title: "Unreachable",
+    accent: "text-violet-400",
+    statStyle: "bg-violet-950 text-violet-400 ring-1 ring-violet-900",
+    hint: "Imported somewhere, but not reachable from the app entry point — dead code that looks alive",
+  },
   { key: "unused",      title: "Unused",      accent: "text-red-400",     statStyle: "bg-red-950 text-red-400 ring-1 ring-red-900" },
   { key: "rarely-used", title: "Rarely Used", accent: "text-amber-400",   statStyle: "bg-amber-950 text-amber-400 ring-1 ring-amber-900" },
   { key: "normal",      title: "Normal",      accent: "text-sky-400",     statStyle: "bg-sky-950 text-sky-400 ring-1 ring-sky-900" },
   { key: "core",        title: "Core",        accent: "text-emerald-400", statStyle: "bg-emerald-950 text-emerald-400 ring-1 ring-emerald-900" },
 ];
 
+// Chevron icon — points down when expanded, right when collapsed
+function Chevron({ collapsed }: { collapsed: boolean }) {
+  return (
+    <svg
+      className={`w-4 h-4 text-zinc-500 transition-transform duration-200 ${collapsed ? "-rotate-90" : ""}`}
+      viewBox="0 0 20 20"
+      fill="currentColor"
+    >
+      <path
+        fillRule="evenodd"
+        d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
+        clipRule="evenodd"
+      />
+    </svg>
+  );
+}
+
 export default function ScanResult() {
   const { id } = useParams<{ id: string }>();
-  const [scan, setScan]   = useState<Scan | null>(null);
-  const [error, setError] = useState("");
+  const [scan, setScan]         = useState<Scan | null>(null);
+  const [error, setError]       = useState("");
+  const [collapsed, setCollapsed] = useState<Set<Label>>(new Set());
 
   useEffect(() => {
     client
@@ -59,6 +81,18 @@ export default function ScanResult() {
       .then((res) => setScan(res.data))
       .catch(() => setError("Could not load scan."));
   }, [id]);
+
+  function toggle(key: Label) {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+  }
+
+  function toggleAll(collapse: boolean) {
+    setCollapsed(collapse ? new Set(grouped.filter(g => g.items.length > 0).map(g => g.key)) : new Set());
+  }
 
   if (error) {
     return (
@@ -94,9 +128,10 @@ export default function ScanResult() {
     ),
   }));
 
-  // Only show the stat tile for "unreachable" if at least one component is unreachable
-  const hasUnreachable = grouped.find((g) => g.key === "unreachable")!.items.length > 0;
-  const statTiles = grouped.filter((g) => g.key !== "unreachable" || hasUnreachable);
+  const hasUnreachable  = grouped.find((g) => g.key === "unreachable")!.items.length > 0;
+  const visibleTiles    = grouped.filter((g) => g.key !== "unreachable" || hasUnreachable);
+  const nonEmptySections = grouped.filter((g) => g.items.length > 0);
+  const allCollapsed    = nonEmptySections.every((g) => collapsed.has(g.key));
 
   return (
     <Layout>
@@ -115,44 +150,67 @@ export default function ScanResult() {
         <p className="text-sm text-zinc-500 mt-1">{scan.components.length} components found</p>
       </div>
 
-      {/* Stats row — adapts to 4 or 5 columns depending on whether unreachable exist */}
+      {/* Stats row */}
       <div className={`grid gap-3 my-8 ${hasUnreachable ? "grid-cols-5" : "grid-cols-4"}`}>
-        {statTiles.map(({ key, title, statStyle, items }) => (
-          <div key={key} className="bg-zinc-900 rounded-xl border border-zinc-800 p-4 text-center">
+        {visibleTiles.map(({ key, title, statStyle, items }) => (
+          <button
+            key={key}
+            onClick={() => toggle(key)}
+            className="bg-zinc-900 rounded-xl border border-zinc-800 hover:border-zinc-700 p-4 text-center transition-colors duration-150"
+          >
             <p className="text-2xl font-bold text-zinc-100">{items.length}</p>
             <span className={`inline-block text-xs font-medium px-2 py-0.5 rounded-full mt-1.5 ${statStyle}`}>
               {title}
             </span>
-          </div>
+          </button>
         ))}
       </div>
 
+      {/* Section controls */}
+      {nonEmptySections.length > 1 && (
+        <div className="flex justify-end mb-4">
+          <button
+            onClick={() => toggleAll(!allCollapsed)}
+            className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors duration-150"
+          >
+            {allCollapsed ? "Expand all" : "Collapse all"}
+          </button>
+        </div>
+      )}
+
       {/* Sections */}
-      {grouped.map(({ key, title, accent, items }) =>
+      {grouped.map(({ key, title, accent, hint, items }) =>
         items.length === 0 ? null : (
-          <div key={key} className="mb-10">
-            <div className="flex items-center gap-2 mb-4">
+          <div key={key} className="mb-6">
+            {/* Section header — click to toggle */}
+            <button
+              onClick={() => toggle(key)}
+              className="flex items-center gap-2 w-full text-left mb-4 group"
+            >
+              <Chevron collapsed={collapsed.has(key)} />
               <h2 className={`text-base font-semibold ${accent}`}>{title}</h2>
               <span className="text-sm text-zinc-600">({items.length})</span>
-              {key === "unreachable" && (
-                <span className="text-xs text-zinc-600 ml-1">
-                  — imported somewhere, but not reachable from the app entry point
-                </span>
+              {hint && !collapsed.has(key) && (
+                <span className="text-xs text-zinc-600 ml-1 hidden sm:inline">— {hint}</span>
               )}
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {items.map((c) => (
-                <ComponentCard
-                  key={c.id}
-                  name={c.name}
-                  definedIn={c.definedIn}
-                  usageCount={c.usageCount}
-                  usedIn={c.usedIn}
-                  label={getLabel(c.usageCount, c.reachable)}
-                  reachable={c.reachable ?? true}
-                />
-              ))}
-            </div>
+            </button>
+
+            {/* Section body */}
+            {!collapsed.has(key) && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {items.map((c) => (
+                  <ComponentCard
+                    key={c.id}
+                    name={c.name}
+                    definedIn={c.definedIn}
+                    usageCount={c.usageCount}
+                    usedIn={c.usedIn}
+                    label={getLabel(c.usageCount, c.reachable)}
+                    reachable={c.reachable ?? true}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         )
       )}
