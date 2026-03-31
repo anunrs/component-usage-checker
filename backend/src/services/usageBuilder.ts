@@ -53,7 +53,19 @@ export function buildUsageMap(
   const result: ComponentUsage[] = [];
 
   for (const [name, definedIn] of definitions) {
-    const usedIn = usages.get(name) ?? [];
+    const allUsedIn = usages.get(name) ?? [];
+    const definedInReachable = reachableFiles === null ? true : reachableFiles.has(definedIn);
+
+    // For reachable components: only count imports from reachable files.
+    // This prevents dead-code files from inflating usage labels (e.g. a
+    // component shouldn't be "Core" just because 10 unreachable files import it).
+    // For unreachable components: keep all importers so the graph still shows
+    // the dead-code structure (e.g. ButtonSection imported by SubMenuPage).
+    const usedIn =
+      reachableFiles !== null && definedInReachable
+        ? allUsedIn.filter((f) => reachableFiles.has(f))
+        : allUsedIn;
+
     const usageCount = usedIn.length;
 
     result.push({
@@ -62,8 +74,7 @@ export function buildUsageMap(
       usedIn,
       usageCount,
       label: getLabel(usageCount),
-      // null means no entry point found — default conservatively to true
-      reachable: reachableFiles === null ? true : reachableFiles.has(definedIn),
+      reachable: definedInReachable,
     });
   }
 
