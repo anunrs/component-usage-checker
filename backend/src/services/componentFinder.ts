@@ -14,6 +14,9 @@ const COMPONENT_PATTERNS = [
   /export\s+class\s+([A-Z][a-zA-Z0-9]*)/,
   // export default class MyComponent
   /export\s+default\s+class\s+([A-Z][a-zA-Z0-9]*)/,
+  // export default MyComponent  (declared earlier in the file, then exported at the bottom)
+  // Negative lookahead prevents false positives from React.memo(...), withRouter(...) etc.
+  /export\s+default\s+([A-Z][a-zA-Z0-9]*)(?![.(a-zA-Z0-9_])/,
 ];
 
 export function findComponents(content: string): string[] {
