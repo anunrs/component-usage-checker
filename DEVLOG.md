@@ -2,36 +2,41 @@
 
 ## What I Built
 
-Component Usage Checker is a full-stack developer tool that accepts a zip file of any React + TypeScript codebase, scans every source file, maps out every component that is defined in the project, tracks where each component is imported, and produces a visual dashboard that categorises every component by how heavily it is used.
+Component Usage Checker is a full-stack developer tool that accepts a zip file of any React + TypeScript codebase, scans every source file, maps out every component that is defined in the project, tracks where each component is imported, and produces a visual dashboard that categorises every component by how heavily it is used — and whether it is even reachable from the app's entry point.
 
 The problem it solves: in any React project that has been alive for more than a year, there are always components that were created for a feature, the feature was changed or removed, but the component file was never deleted. Nobody knows what is safe to remove. This tool tells you exactly that — and also surfaces which components are the backbone of the entire codebase, so you know what not to touch.
 
-### Four categories of output
+### Five categories of output
+
+**Unreachable** — defined and even imported somewhere, but the import chain never connects back to the app's entry point. This is dead code that *looks* alive. The most dangerous kind.
 
 **Unused** — defined in the project but never imported anywhere. Safe to delete.
 
-**Rarely Used** — imported in exactly one file. May be a candidate for inlining or removal.
+**Rarely Used** — imported in exactly one reachable file. May be a candidate for inlining or removal.
 
-**Normal** — imported in 2 to 4 files. Healthy usage, no action needed.
+**Normal** — imported in 2 to 4 reachable files. Healthy usage, no action needed.
 
-**Core** — imported in 5 or more files. These are the building blocks of the project. Treat changes to these carefully.
+**Core** — imported in 5 or more reachable files. These are the building blocks of the project. Treat changes to these carefully.
+
+> **Note:** Usage counts only count imports from *reachable* files. An unreachable file importing a component does not make that component more "used" — it's dead code importing another component. This is what makes the Core/Normal/etc. labels accurate even in large codebases with dead feature branches.
 
 ---
 
 ## How It Works — End to End
 
 1. User registers or logs in
-2. User uploads a `.zip` file of their React + TypeScript project and gives it a name
-3. The backend receives the zip via multer, saves it temporarily to `/tmp`
-4. A scan record is created in the database with status `"pending"`
-5. The zip is opened with `adm-zip` and every `.ts` and `.tsx` file is read into memory as a string — nothing is extracted to disk permanently
-6. Every file is scanned for component definitions (exported identifiers starting with a capital letter)
-7. Every file is scanned for local import statements (imports from `./` or `../` paths only — not from `node_modules`)
-8. The results are combined into a usage map: each component name → which files import it → usage count → label
-9. All components are saved to the database as rows linked to the scan
-10. The scan status is updated to `"complete"`
-11. The zip file is deleted from `/tmp`
-12. The user is redirected to the scan result page, which fetches the component list and renders it grouped by label with stat tiles at the top
+2. User uploads a `.zip` file of their React + TypeScript project (any size — full project or just `src/`) and gives it a name
+3. **Client-side:** JSZip filters the zip in-browser — strips everything except `.ts`/`.tsx` files (excluding `node_modules` and `.d.ts`), repacks a tiny filtered zip, then uploads that. A 225 MB project zip becomes a 1–2 MB upload.
+4. The backend receives the filtered zip via multer, saves it temporarily to `/tmp`
+5. A scan record is created in the database with status `"pending"`
+6. The zip is opened with `adm-zip` and every `.ts` and `.tsx` file is read into memory
+7. Every file is scanned for component definitions using an exhaustive set of export pattern regexes
+8. **Reachability analysis:** a file-level import graph is built and BFS is run from the app's entry point (`src/index.tsx`, `src/main.tsx`, etc.) to determine which files are reachable
+9. Every file is scanned for local import statements to build the usage map
+10. Components in unreachable files are marked `reachable: false`. For reachable components, `usedIn` is filtered to only include reachable importers
+11. All components are saved to the database
+12. The scan status is updated to `"complete"` and the zip is deleted from `/tmp`
+13. The user is redirected to the scan result page, which shows components grouped by label with collapsible sections and a per-component import graph popup
 
 ---
 
@@ -39,14 +44,13 @@ The problem it solves: in any React project that has been alive for more than a 
 
 ```
 Frontend (React + CRA)  →  Backend (Express on Vercel Serverless)  →  PostgreSQL (Supabase)
-                                        ↑
-                              multer (zip upload)
-                              adm-zip (zip extraction)
-                              componentFinder + importParser + usageBuilder
-                              (all in-memory, no persistent file writes)
+     ↓                               ↑
+JSZip filter                 multer (zip upload)
+(client-side,                adm-zip (zip extraction)
+strips non-TS                graphBuilder (BFS reachability)
+before upload)               componentFinder + importParser + usageBuilder
+                             (all in-memory, no persistent file writes)
 ```
-
-There are no background jobs or scheduled tasks in this project. Everything happens on-demand when a user makes a request. This is what makes Vercel's serverless model a perfect fit — unlike API Drift Observatory which needed a persistent `node-cron` process, Component Usage Checker only does work when a request comes in.
 
 ---
 
@@ -57,13 +61,12 @@ component-usage-checker/
 ├── backend/
 │   ├── prisma/
 │   │   ├── schema.prisma              # 3 models: User, Scan, Component
-│   │   ├── migrations/                # SQL migration history (gitignored in this project)
+│   │   ├── migrations/                # SQL migration history
 │   │   └── migration_lock.toml
 │   ├── prisma.config.ts               # Prisma v7 config — loads DATABASE_URL via dotenv
 │   ├── src/
 │   │   ├── index.ts                   # Express app entry point — exported for Vercel, listen() guarded
 │   │   ├── generated/                 # Prisma generated client (gitignored — regenerated on deploy)
-│   │   ├── uploads/                   # Local dev fallback folder (unused in production — /tmp used instead)
 │   │   ├── lib/
 │   │   │   └── prisma.ts              # Singleton PrismaClient with pg Pool adapter + SSL config
 │   │   ├── middleware/
@@ -73,9 +76,10 @@ component-usage-checker/
 │   │   │   └── scans.ts               # POST /scans/upload, GET /scans, GET /scans/:id
 │   │   └── services/
 │   │       ├── zipExtractor.ts        # Opens zip, returns { filePath, content }[] for .ts/.tsx files
-│   │       ├── componentFinder.ts     # Finds exported component names in a file via regex
+│   │       ├── graphBuilder.ts        # Builds file import graph + BFS reachability from entry point
+│   │       ├── componentFinder.ts     # Finds exported component names in a file via regex (exhaustive)
 │   │       ├── importParser.ts        # Finds locally imported component names in a file via regex
-│   │       └── usageBuilder.ts        # Combines finder + parser output into ComponentUsage[]
+│   │       └── usageBuilder.ts        # Combines finder + parser + reachability into ComponentUsage[]
 │   ├── vercel.json                    # Vercel serverless config — routes all traffic to src/index.ts
 │   ├── tsconfig.json
 │   ├── package.json
@@ -90,14 +94,15 @@ component-usage-checker/
 │   │   │   └── client.ts              # Axios instance with JWT interceptor
 │   │   ├── components/
 │   │   │   ├── Layout.tsx             # Shared nav — logo, New Scan button, Logout
-│   │   │   ├── ComponentCard.tsx      # One component — name, file, count, importing files
-│   │   │   └── UsageTag.tsx           # Pill badge — Unused / Rarely used / Normal / Core
+│   │   │   ├── ComponentCard.tsx      # One component — name, file, count, importing files, graph icon
+│   │   │   ├── ComponentGraph.tsx     # Portal-based import graph popup (left-to-right SVG)
+│   │   │   └── UsageTag.tsx           # Pill badge — Unreachable / Unused / Rarely used / Normal / Core
 │   │   └── pages/
 │   │       ├── Login.tsx
 │   │       ├── Register.tsx
 │   │       ├── Dashboard.tsx          # Past scans list with skeleton loading + empty state
-│   │       ├── UploadPage.tsx         # Styled file drop zone + project name input
-│   │       └── ScanResult.tsx         # Stat tiles + grouped component cards
+│   │       ├── UploadPage.tsx         # Drop zone + JSZip client-side filter + project name input
+│   │       └── ScanResult.tsx         # Stat tiles + collapsible grouped component sections
 │   ├── .env                           # REACT_APP_API_URL (gitignored)
 │   ├── package.json
 │   └── .gitignore
@@ -129,12 +134,18 @@ component-usage-checker/
 | ts-node | 10.x | Run TypeScript directly in dev |
 | nodemon | 3.x | Auto-restart dev server on file save |
 
-**TypeScript compiler config (`tsconfig.json`):**
-- Target: `ES2020`
-- Module: `commonjs`
-- Strict mode: on
-- Source: `src/` → compiled to `dist/`
-- `skipLibCheck: true` — avoids type errors in generated Prisma client
+### Frontend
+
+| Technology | Version | Purpose |
+|---|---|---|
+| React | 19.x | UI framework |
+| TypeScript | 4.x | Type safety |
+| Create React App (react-scripts) | 5.x | Build tooling and dev server |
+| React Router DOM | 7.x | Client-side routing |
+| Axios | 1.x | HTTP client for API calls |
+| JSZip | 3.x | Client-side zip filtering before upload |
+| TailwindCSS | Via CDN | Utility CSS styling |
+| Inter | Via Google Fonts | Typography |
 
 ### Database
 
@@ -146,13 +157,13 @@ component-usage-checker/
 
 **Why the session pooler specifically (not direct, not transaction pooler):**
 
-Three connection options exist on Supabase. Each has a critical reason why it was or wasn't used:
+- **Direct connection** (`db.xxxx.supabase.co:5432`) — DNS does not resolve on the NANO tier. Causes `P1001: Can't reach database server`. Do not use.
+- **Transaction pooler** (`aws-0-region.pooler.supabase.com:6543`) — PgBouncer transaction mode does not support Prisma's prepared statements. Causes runtime query errors. Do not use with Prisma.
+- **Session pooler** (`aws-0-region.pooler.supabase.com:5432`) — PgBouncer session mode supports prepared statements. Works for migrations and the running app. **This is the correct choice.**
 
-- **Direct connection** (`db.xxxx.supabase.co:5432`) — DNS does not resolve on the NANO tier. The hostname simply doesn't exist from the outside world. This caused `P1001: Can't reach database server` errors. Do not use for NANO projects.
-- **Transaction pooler** (`aws-0-region.pooler.supabase.com:6543`) — Routes through PgBouncer in transaction mode. Prisma uses **prepared statements** internally and PgBouncer's transaction mode does not support them. This causes runtime query errors. Do not use with Prisma.
-- **Session pooler** (`aws-0-region.pooler.supabase.com:5432`) — Routes through PgBouncer in session mode, which does support prepared statements. This works for both migrations (`prisma migrate dev`) and the running application. **This is the correct choice.**
+---
 
-**Database schema — 3 models:**
+## Database Schema
 
 ```prisma
 model User {
@@ -180,40 +191,16 @@ model Component {
   name        String   // e.g. "ButtonPrimary"
   definedIn   String   // file path inside the zip e.g. "src/components/Button.tsx"
   usageCount  Int      @default(0)
-  usedIn      Json     // array of file paths that import this component
+  usedIn      Json     // array of file paths that import this component (reachable importers only)
+  reachable   Boolean  @default(true)  // false = not reachable from app entry point
 }
 ```
 
-**Important:** The `label` field (unused / rarely-used / normal / core) is **not stored in the database**. It is computed on the frontend at render time from `usageCount`. This was a deliberate decision — storing a derived value that can always be recalculated from existing data is unnecessary. If the label thresholds ever change, no migration is needed.
+**Key design decisions:**
 
-**Prisma client generation:**
-The client is generated to `src/generated/prisma` and is gitignored. It must be regenerated after every `npm install` via a `postinstall` script in `package.json`. This is what allows Vercel to regenerate it during deployment without the files being committed to the repo.
-
-### Frontend
-
-| Technology | Version | Purpose |
-|---|---|---|
-| React | 19.x | UI framework |
-| TypeScript | 4.x | Type safety |
-| Create React App (react-scripts) | 5.x | Build tooling and dev server |
-| React Router DOM | 7.x | Client-side routing |
-| Axios | 1.x | HTTP client for API calls |
-| TailwindCSS | Via CDN | Utility CSS styling |
-| Inter | Via Google Fonts | Typography |
-
-**Why TailwindCSS via CDN:**
-CRA manages its own internal PostCSS pipeline and does not allow custom `postcss.config.js` overrides without ejecting. Tailwind v4 requires PostCSS integration which conflicts with CRA's internals. The simplest and most reliable solution is loading Tailwind from the CDN `<script>` tag in `public/index.html`. This works identically in development and production.
-
-**Routing structure:**
-- `/` → redirects to `/login`
-- `/login` → Login page (public)
-- `/register` → Register page (public)
-- `/dashboard` → Scan list (protected)
-- `/upload` → Zip upload form (protected)
-- `/scans/:id` → Scan result detail (protected)
-- `*` → redirects to `/login`
-
-Protected routes use a `PrivateRoute` component that checks for a JWT in `localStorage`. If absent, it redirects to `/login` using React Router's `<Navigate>`.
+- `label` is **not stored** — it is computed on the frontend from `usageCount`. Storing a derived value means running a migration when thresholds change. Since `usageCount` is always stored, the label can always be recalculated.
+- `reachable` defaults to `true` — conservative default. Old scan records and scans where no entry point was detectable are treated as fully reachable. This avoids false positives.
+- `usedIn` stores only **reachable importers** for reachable components. For unreachable components, all importers are stored (to show dead-code structure in the graph).
 
 ---
 
@@ -221,117 +208,166 @@ Protected routes use a `PrivateRoute` component that checks for a JWT in `localS
 
 ### zipExtractor.ts
 
-Accepts the file path of the uploaded zip (in `/tmp`). Uses `adm-zip` to open the zip and calls `getEntries()` which returns every item inside — both files and directories.
+Accepts the file path of the uploaded zip (in `/tmp`). Uses `adm-zip` to open it and iterates all entries. For each entry:
+- Skip if `entry.isDirectory`
+- Skip if path doesn't end in `.ts` or `.tsx`
+- Skip if path ends in `.d.ts` — **declaration files are type stubs, not component implementations.** Including them caused false-positive component entries from things like `export declare const MyThing`.
+- Skip if path includes `node_modules`
+- Otherwise: read content with `entry.getData().toString("utf8")`
 
-For each entry:
-- Skip if `entry.isDirectory` is true
-- Skip if the file path doesn't end in `.ts` or `.tsx`
-- Skip if the file path includes `node_modules`
-- Otherwise: call `entry.getData().toString("utf8")` to get the file content as a string
+Returns: `ExtractedFile[]` — `{ filePath: string, content: string }[]`.
 
-`getData()` returns a `Buffer` (raw bytes). `.toString("utf8")` converts it to a readable string — the same way reading a text file works. This all happens in memory. Nothing is written to disk.
+### graphBuilder.ts
 
-Returns: `ExtractedFile[]` where each object is `{ filePath: string, content: string }`.
+The reachability engine. Builds a file-level import graph and runs BFS from the app's entry point.
 
-```ts
-// Example output:
-[
-  { filePath: "src/components/Button.tsx", content: "export const Button = ..." },
-  { filePath: "src/pages/Home.tsx", content: "import { Button } from ..." },
-  ...
-]
+**Step 1 — Find the entry point**
+
+Searches for known entry point files in priority order:
 ```
+src/index.tsx, src/index.ts, src/main.tsx, src/main.ts, src/App.tsx, src/App.ts
+index.tsx, index.ts, main.tsx, main.ts
+```
+
+Uses suffix matching (e.g. `filePath.endsWith("/src/index.tsx")`) so zips with a root folder prefix (`my-app/src/index.tsx`) are found correctly.
+
+If no entry point is found: returns `null`. The caller (`usageBuilder`) treats `null` as "skip reachability — all components are reachable." This is the conservative false-positive prevention — better to show everything as reachable than to incorrectly mark live components as dead.
+
+**Step 2 — Parse import paths**
+
+A separate regex (not the same as `importParser`) extracts only the file path string from each import — not the component names:
+```ts
+/from\s+['"]([^'"]+)['"]/g
+```
+Filters to only `./` and `../` local imports.
+
+**Step 3 — Resolve import paths to actual file paths**
+
+Given a source file `my-app/src/pages/Home.tsx` importing `../components/Button`:
+- Compute: `path.posix.join("my-app/src/pages", "../components/Button")` → `my-app/src/components/Button`
+- Try extensions in order: `.tsx`, `.ts`, `.jsx`, `.js`, `/index.tsx`, `/index.ts`, `/index.jsx`, `/index.js`
+- Return the first candidate that exists in the file set
+
+This handles both bare imports (`Button`) and index imports (`Button/index.tsx`).
+
+**Step 4 — BFS**
+
+Standard breadth-first search from the entry point file. Visits each file once, resolves all its imports, enqueues unvisited resolved files. Returns `Set<string>` of all reachable file paths.
+
+**Why BFS and not DFS:** Both work for reachability. BFS was chosen because it naturally finds shortest paths (useful for future "show path from root" feature) and processes files in a predictable level-by-level order.
 
 ### componentFinder.ts
 
-Accepts the text content of a single file as a string. Splits it into lines and tests each line against three regex patterns:
+Exhaustive regex-based component detection. Covers every export form TypeScript supports:
 
 ```ts
-/export\s+function\s+([A-Z][a-zA-Z0-9]*)/        // export function MyComponent
-/export\s+const\s+([A-Z][a-zA-Z0-9]*)\s*=/       // export const MyComponent =
-/export\s+default\s+function\s+([A-Z][a-zA-Z0-9]*)/ // export default function MyComponent
+// Named function — with or without async
+/export\s+(?:async\s+)?function\s+([A-Z][a-zA-Z0-9]*)/
+
+// Default function — with or without async
+/export\s+default\s+(?:async\s+)?function\s+([A-Z][a-zA-Z0-9]*)/
+
+// Variable declaration — const, let, or var; plain or type-annotated
+// export const Foo = ...   AND   export const Foo: React.FC<P> = ...
+// The \s*[:=] is the key fix — allows a colon (type annotation) before =
+/export\s+(?:const|let|var)\s+([A-Z][a-zA-Z0-9]*)\s*[:=]/
+
+// Class — with or without abstract
+/export\s+(?:abstract\s+)?class\s+([A-Z][a-zA-Z0-9]*)/
+
+// Default class — with or without abstract
+/export\s+default\s+(?:abstract\s+)?class\s+([A-Z][a-zA-Z0-9]*)/
+
+// Default identifier — the most commonly missed pattern
+// const Foo = ...; export default Foo;
+// Negative lookahead prevents false positives from React.memo(Foo), HOC(Foo), Foo.Bar
+/export\s+default\s+([A-Z][a-zA-Z0-9]*)(?![.(a-zA-Z0-9_])/
 ```
 
-The capital letter constraint (`[A-Z]`) is what distinguishes React components from regular exported utilities. React components always start with a capital letter by convention — this is also a requirement for JSX to recognise them as components rather than HTML elements.
+Additionally, `export { Foo }` and `export { Foo as Bar }` (without `from`) are handled separately via a full-content scan with a global regex. This covers the "declare at top, export at bottom" pattern:
+```ts
+const MyComponent = () => { ... };
+// ... other code ...
+export { MyComponent };         // tracked as "MyComponent"
+export { MyComponent as Pub };  // tracked as "Pub" (the exported name)
+```
 
-Uses a `Set<string>` to collect names so duplicates are automatically ignored. Returns `string[]` of component names found in that file.
+`export type { Foo }` and `export { Foo } from '...'` (re-exports from other files) are explicitly excluded — they are not new definitions.
 
-No AST (Abstract Syntax Tree) parser is used. This is intentional — a full TypeScript compiler or parser like `@typescript-eslint/parser` would be accurate but complex to set up and overkill for v1. Plain regex scanning covers the vast majority of real-world component definitions.
+No AST parser is used. Regex scanning is fast and covers all real-world React patterns. The capital letter constraint (`[A-Z]`) is what distinguishes React components from utilities.
 
 ### importParser.ts
 
-Accepts the text content of a single file as a string. Uses a single global regex to find all import statements:
+Finds locally imported component names in a file. The regex captures the entire import clause in one match, then parses the parts separately:
 
 ```ts
-/import\s+(?:(\w+)|(?:\{([^}]+)\}))\s+from\s+['"]([^'"]+)['"]/g
+/import\s+(type\s+)?([^'"]+?)\s+from\s+['"]([^'"]+)['"]/g
 ```
 
-This regex captures three groups:
-- `match[1]` — default import name (e.g. `Button` from `import Button from "..."`)
-- `match[2]` — named imports as a raw string (e.g. `Button, Modal` from `import { Button, Modal } from "..."`)
-- `match[3]` — the import source path (e.g. `"../components/Button"`)
+- `match[1]` — `"type "` if it's an `import type { ... }` — these are skipped entirely
+- `match[2]` — the full import clause: `Button`, `Button, { IconLeft }`, `{ Button, Modal }`, etc.
+- `match[3]` — the source path
 
-For each match:
-1. Check `match[3]` (the source path) — if it doesn't start with `./` or `../`, skip it. This filters out all `node_modules` imports like `react`, `axios`, etc.
-2. If a default import exists and starts with a capital letter → add to results
-3. If named imports exist → split by comma → trim each → add any that start with a capital letter
+For each match where source starts with `./` or `../`:
 
-The capital letter filter excludes lowercase imports like `useState`, `useEffect`, `classnames` etc. — only component names (PascalCase) are collected.
+**Default import:** Strip the `{ ... }` block from the clause, remove commas. What remains is the default import name. Check for capital letter.
 
-**Critical detail — resetting `lastIndex`:**
-The regex uses the `g` (global) flag. In JavaScript, a global regex is stateful — it remembers the position it left off at between calls via a `lastIndex` property. If `lastIndex` is not reset to `0` after processing each file, the next file's search starts from the wrong position and matches are silently missed. This is one of the most common and subtle bugs with global regexes in JavaScript. The fix is one line: `IMPORT_PATTERN.lastIndex = 0` at the end of the function.
+**Named imports:** Extract the `{ ... }` block. Split by comma. For each entry:
+- Skip if it starts with `"type "` — inline type imports (TS 4.5+): `import { type ButtonProps, Button }`
+- Handle aliases: `"Button as Btn"` → split by ` as ` → use `"Button"` (the original export name, not the local alias). This is critical: the componentFinder records the export name, so the importer must also reference the export name for the match to work.
 
-Returns: `string[]` of component names imported in that file.
+**Multi-line imports** work automatically: `[^'"]+?` in the import pattern and `[^}]+` in the named block match newline characters since these are character class patterns, not `.`.
 
 ### usageBuilder.ts
 
-The orchestrator. Takes the full list of `ExtractedFile[]` from `zipExtractor` and runs a two-pass algorithm:
+Orchestrates the full pipeline. Takes `ExtractedFile[]` and a `Set<string> | null` reachable file set.
 
-**Pass 1 — Build the definition map**
+**Pass 1 — Definitions map:** `componentFinder` on every file → `Map<componentName, filePath>`
 
-Iterates every file, calls `findComponents(file.content)` for each one. Collects results into a `Map<componentName, filePath>`.
+**Pass 2 — Usages map:** `importParser` on every file → `Map<componentName, filePath[]>`
 
+**Combine with reachability:**
 ```ts
-// e.g. { "Button": "src/components/Button.tsx", "Modal": "src/components/Modal.tsx" }
-```
+for (const [name, definedIn] of definitions) {
+  const allUsedIn = usages.get(name) ?? [];
+  const definedInReachable = reachableFiles === null ? true : reachableFiles.has(definedIn);
 
-If the same component name is defined in multiple files, the last one wins (this is an edge case — component names in a real project are almost always unique).
-
-**Pass 2 — Build the usage map**
-
-Iterates every file again, calls `parseImports(file.content)` for each one. For each imported name, records which file it was imported into.
-
-```ts
-// e.g. { "Button": ["src/pages/Home.tsx", "src/pages/Dashboard.tsx", "src/App.tsx"] }
-```
-
-**Combine**
-
-Iterates the definition map. For each component:
-- Look up its usages in the usage map (default to `[]` if not found — meaning it's unused)
-- Count the array length as `usageCount`
-- Compute the label
-- Build the final `ComponentUsage` object
-
-```ts
-interface ComponentUsage {
-  name: string;
-  definedIn: string;
-  usedIn: string[];
-  usageCount: number;
-  label: "unused" | "rarely-used" | "normal" | "core";
+  // Reachable components: filter usedIn to only reachable importers
+  // Unreachable components: keep all importers (to show dead-code structure)
+  const usedIn = (reachableFiles !== null && definedInReachable)
+    ? allUsedIn.filter(f => reachableFiles.has(f))
+    : allUsedIn;
 }
 ```
 
-**Why two passes instead of one:** In a single pass, when you process a file you haven't yet seen the definitions in files that come later. You can't know if an import refers to something defined in a file you haven't read yet. The two-pass approach ensures all definitions are known before usages are attributed.
+This is the key insight: if `FederationList` (unreachable) imports `ColorContext` (reachable/core), that import should NOT count toward ColorContext's usage score. The tool is measuring how embedded a component is in the *live* application — not in dead feature branches.
 
-**Label thresholds:**
+---
+
+## Client-Side Zip Filtering
+
+Vercel serverless functions have a hard 4.5 MB request body limit. A typical zipped React project (including `node_modules`) is 100–300 MB. Even a `src/`-only zip of a large codebase can exceed the limit.
+
+**Solution:** Filter the zip in the browser before uploading using JSZip.
+
 ```ts
-usageCount === 0  → "unused"
-usageCount === 1  → "rarely-used"
-usageCount >= 5   → "core"
-default           → "normal"   // 2, 3, or 4
+const original = await JSZip.loadAsync(rawFile);
+const filtered = new JSZip();
+
+original.forEach((path, entry) => {
+  if (entry.dir)                       return;
+  if (path.includes("node_modules"))   return;
+  if (path.endsWith(".d.ts"))          return;  // type stubs, not source
+  if (!path.endsWith(".ts") && !path.endsWith(".tsx")) return;
+  // add to filtered zip
+});
+
+const blob = await filtered.generateAsync({ type: "blob", compression: "DEFLATE" });
 ```
+
+The UI shows the result before upload: "312 TypeScript files · 847 KB". A 225 MB project zip typically filters down to under 2 MB. The upload button is disabled until filtering completes.
+
+This also means users can upload their entire project zip without worrying about what to include — the tool handles the filtering automatically.
 
 ---
 
@@ -340,36 +376,35 @@ default           → "normal"   // 2, 3, or 4
 ```
 POST /scans/upload
   │
-  ├── authenticateToken middleware (validates JWT, attaches userId)
+  ├── authenticateToken middleware
   │
-  ├── multer middleware
-  │     - reads multipart/form-data
-  │     - saves zip to /tmp/timestamp-filename.zip
-  │     - attaches file info to req.file
-  │
-  ├── check req.file exists (400 if not)
-  │
-  ├── read projectName from req.body (default: "Untitled Project")
+  ├── multer middleware (saves filtered zip to /tmp)
   │
   ├── prisma.scan.create({ status: "pending" })
   │
   ├── try:
   │     extractZip(req.file.path)
-  │       → reads zip from /tmp
+  │       → skips dirs, non-.ts/.tsx, .d.ts, node_modules
   │       → returns ExtractedFile[]
   │
-  │     buildUsageMap(files)
-  │       → findComponents() on every file
+  │     buildReachabilitySet(files)
+  │       → finds entry point (src/index.tsx etc.)
+  │       → builds file import graph
+  │       → BFS from entry point
+  │       → returns Set<string> of reachable file paths (or null if no entry point)
+  │
+  │     buildUsageMap(files, reachableFiles)
+  │       → findComponents() on every file (exhaustive export patterns)
   │       → parseImports() on every file
-  │       → returns ComponentUsage[]
+  │       → cross-references with reachableFiles
+  │       → returns ComponentUsage[] with reachable boolean per component
   │
   │     prisma.component.createMany(...)
-  │       → one row per component
+  │       → one row per component, includes reachable field
   │
   │     prisma.scan.update({ status: "complete" })
   │
   │     fs.unlinkSync(req.file.path)
-  │       → deletes zip from /tmp
   │
   │     res.status(201).json({ scanId })
   │
@@ -389,31 +424,26 @@ POST /scans/upload
 | POST | /auth/login | No | Verify credentials, returns JWT |
 
 ### Scans (`/scans`)
-All scans routes are protected via `router.use(authenticateToken)` at the top of the router file — one declaration covers all routes below it.
-
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | POST | /scans/upload | Yes | Upload zip, run scan, save results |
-| GET | /scans | Yes | List all scans for the logged-in user (ordered by createdAt desc) |
-| GET | /scans/:id | Yes | Get one scan with full component list (includes: { components: true }) |
+| GET | /scans | Yes | List all scans for the logged-in user |
+| GET | /scans/:id | Yes | Get one scan with full component list |
 
 ### Health
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | /health | No | Returns `{ status: "ok" }` — used to verify the server is running |
+| GET | /health | No | Returns `{ status: "ok" }` |
 
 ---
 
 ## Authentication Flow
 
-**Registration / Login:**
-The server hashes the password with `bcrypt` (cost factor 10) and stores the hash. On login, `bcrypt.compare()` verifies the password against the stored hash. If valid, a JWT is signed with the user's `id` as payload and `JWT_SECRET` as the signing key. The token expires in 7 days. The token is returned to the client.
+**Registration / Login:** bcrypt (cost factor 10) hashes passwords. JWT signed with `JWT_SECRET`, expires in 7 days.
 
-**On the frontend:**
-The token is stored in `localStorage`. The Axios client in `src/api/client.ts` has a request interceptor that reads the token from `localStorage` on every request and attaches it as `Authorization: Bearer <token>`. No manual token handling is needed in any page component.
+**Frontend:** Token stored in `localStorage`. Axios request interceptor attaches it as `Authorization: Bearer <token>` on every request.
 
-**On the backend:**
-The `authenticateToken` middleware in `src/middleware/auth.ts` reads the `Authorization` header, extracts the token after `"Bearer "`, and calls `jwt.verify()`. If valid, it attaches `userId` to the request via a custom `AuthRequest` interface that extends Express's `Request`. If the token is missing or invalid, it returns 401 or 403 immediately.
+**Backend:** `authenticateToken` middleware verifies the token, attaches `userId` to `AuthRequest`. Applied once at the top of the scans router with `router.use(authenticateToken)` — covers all routes below it.
 
 ---
 
@@ -430,43 +460,44 @@ The `authenticateToken` middleware in `src/middleware/auth.ts` reads the `Author
 | Primary text | `text-zinc-100` | #f4f4f5 |
 | Secondary text | `text-zinc-500` | #71717a |
 | Muted / file paths | `text-zinc-600` | #52525b |
-| Input background | `bg-zinc-800` | #27272a |
 | Primary button | `bg-indigo-600` | #4f46e5 |
-| Primary button hover | `bg-indigo-500` | #6366f1 |
 
-### Label Color System (dark mode)
+### Label Color System
 
-| Label | Background | Text | Ring |
-|---|---|---|---|
-| unused | `bg-red-950` | `text-red-400` | `ring-red-900` |
-| rarely-used | `bg-amber-950` | `text-amber-400` | `ring-amber-900` |
-| normal | `bg-sky-950` | `text-sky-400` | `ring-sky-900` |
-| core | `bg-emerald-950` | `text-emerald-400` | `ring-emerald-900` |
+| Label | Background | Text | Ring | Left border |
+|---|---|---|---|---|
+| unreachable | `bg-violet-950` | `text-violet-400` | `ring-violet-900` | `border-l-violet-500` |
+| unused | `bg-red-950` | `text-red-400` | `ring-red-900` | `border-l-red-500` |
+| rarely-used | `bg-amber-950` | `text-amber-400` | `ring-amber-900` | `border-l-amber-500` |
+| normal | `bg-sky-950` | `text-sky-400` | `ring-sky-900` | `border-l-sky-500` |
+| core | `bg-emerald-950` | `text-emerald-400` | `ring-emerald-900` | `border-l-emerald-500` |
 
-### ComponentCard Left Border Accent
+### Import Graph Popup (ComponentGraph.tsx)
 
-Each card has a `border-l-4` accent that matches its label section:
-- unused → `border-l-red-500`
-- rarely-used → `border-l-amber-500`
-- normal → `border-l-sky-500`
-- core → `border-l-emerald-500`
+Each component card has a graph icon button. Clicking it opens a modal showing which files import that component.
 
-This makes sections scannable at a glance without needing to read the badge.
+**Layout:** Left-to-right SVG — importer file nodes on the left, bezier curves flowing right, the component box on the right with its label colour as the ring colour.
 
-### Interaction Patterns
+**Portal rendering:** The modal is rendered via `ReactDOM.createPortal` into `document.body`, completely outside the ComponentCard's DOM tree. This is critical — the card has `hover:-translate-y-0.5` applied, and without the portal, any mouse movement over the card while the modal is open would retrigger the transform, causing the modal to flicker and shift. The portal breaks that DOM relationship entirely.
 
-- Cards: `hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30 transition-all duration-200`
-- Buttons: `transition-colors duration-150`
-- Skeleton loading: `animate-pulse` on placeholder divs while data is fetching
-- Upload zone: highlighted with `border-indigo-500 bg-indigo-600/10` when a file is selected
-- Submit button: shows an animated SVG spinner while scanning is in progress
+**UX details:**
+- Escape key closes the modal
+- `document.body.style.overflow = "hidden"` prevents background scroll while open
+- Close button is a solid 32×32 bg-zinc-900 target (not just an icon)
+- Staggered opacity animation: file nodes fade in left-to-right, component box last
+- Overflow: if more than 8 importers, remaining shown as a dashed "+N more" node
+- Empty state: shown if no files import the component
+- Unreachable warning banner shown if `reachable === false`
+
+### Collapsible Sections (ScanResult.tsx)
+
+Each section (Unreachable / Unused / Rarely Used / Normal / Core) can be independently collapsed by clicking the section header or the corresponding stat tile. State is tracked as `Set<Label>` in component state. A "Collapse all / Expand all" control appears when there are multiple non-empty sections. Chevron icon rotates to indicate state.
 
 ---
 
 ## Environment Variables
 
-### Backend (`.env` / Vercel dashboard)
-
+### Backend
 ```
 DATABASE_URL=postgresql://postgres.PROJECTREF:PASSWORD@aws-0-ap-south-1.pooler.supabase.com:5432/postgres
 JWT_SECRET=<long random string>
@@ -474,15 +505,10 @@ PORT=3000
 ALLOWED_ORIGINS=https://your-frontend.vercel.app
 ```
 
-`ALLOWED_ORIGINS` accepts a comma-separated list. The backend splits it with `.split(",")` and passes the resulting array to the `cors()` middleware. This allows both localhost and production origins to be listed without code changes.
-
-### Frontend (`.env` / Vercel dashboard)
-
+### Frontend
 ```
 REACT_APP_API_URL=https://your-backend.vercel.app
 ```
-
-The `REACT_APP_` prefix is required by CRA to expose env variables to the browser bundle. Variables without this prefix are not included in the compiled JS. Vercel injects these at **build time** — they are baked into the compiled static assets, not read at runtime. This means changing an env var on Vercel requires a redeploy to take effect.
 
 ---
 
@@ -490,138 +516,76 @@ The `REACT_APP_` prefix is required by CRA to expose env variables to the browse
 
 ### Backend — Vercel (Serverless)
 
-**Why Vercel instead of Render (the previous project's choice):**
-Render's free tier only allows one active web service per account. Since API Drift Observatory was already deployed there, a second service would have required a paid plan. Vercel supports Node.js Express apps as serverless functions and has no such limit on free accounts.
+`vercel.json` routes all traffic to `src/index.ts`. `app.listen()` is guarded by `NODE_ENV !== "production"` so it only runs locally. `export default app` is what Vercel's `@vercel/node` builder picks up.
 
-**Why serverless works for this project but not the previous one:**
-API Drift Observatory ran `node-cron` jobs that need to execute on a timer even when no user is making a request. A serverless function only runs when a request comes in — there is no persistent process. Component Usage Checker has no background jobs. Every piece of work it does is triggered by a user request, making it a perfect fit for serverless.
+`postinstall: "prisma generate"` in `package.json` regenerates the Prisma client after `npm install` on Vercel's build servers (the generated client is gitignored).
 
-**`vercel.json`:**
-```json
-{
-  "version": 2,
-  "builds": [
-    { "src": "src/index.ts", "use": "@vercel/node" }
-  ],
-  "routes": [
-    { "src": "/(.*)", "dest": "src/index.ts" }
-  ]
-}
-```
-This tells Vercel: compile `src/index.ts` using the `@vercel/node` builder (which handles TypeScript automatically), and route every incoming request to it.
-
-**`app.listen()` guard in `src/index.ts`:**
-```ts
-if (process.env.NODE_ENV !== "production") {
-  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-}
-export default app;
-```
-On Vercel, `NODE_ENV` is set to `"production"` automatically, so `app.listen()` never runs — Vercel handles the listening itself. Locally, `NODE_ENV` is not set (or is `"development"`), so `app.listen()` runs as normal. The `export default app` is what Vercel's `@vercel/node` builder picks up to handle requests.
-
-**`postinstall` script in `package.json`:**
-```json
-"postinstall": "prisma generate"
-```
-The Prisma generated client is gitignored. Vercel clones the repo fresh on every deployment and runs `npm install`. The `postinstall` hook runs automatically after `npm install` completes, regenerating the Prisma client before any code runs. Without this, the import `from '../generated/prisma/client'` fails with "Cannot find module".
-
-**`/tmp` for file uploads:**
-Vercel's serverless functions run in ephemeral containers with no writable filesystem except `/tmp`. Multer is configured to write uploaded files to `/tmp` instead of `src/uploads/`. Since the zip is deleted immediately after scanning (`fs.unlinkSync()`), the temporary write to `/tmp` is all that's ever needed.
-
-**Vercel project settings:**
-- Repository: `anunrs/component-usage-checker`
-- Root Directory: `backend`
-- Framework: Other (auto-detected as Node.js)
-- Build: handled by `vercel.json`
-
----
+Uploaded zips go to `/tmp` — the only writable location in Vercel's ephemeral containers. They are deleted immediately after scanning.
 
 ### Frontend — Vercel
 
-**Vercel project settings:**
-- Repository: `anunrs/component-usage-checker` (same monorepo, different root directory)
-- Root Directory: `frontend`
-- Framework Preset: Create React App (auto-detected)
-- Build Command: `react-scripts build` (auto-detected)
-- Output Directory: `build` (auto-detected)
-
-**Deployment trigger:** Vercel auto-deploys on every push to `main` for both the backend and frontend projects. Both are connected to the same GitHub repo but watch different root directories.
-
----
-
-### Git / GitHub
-
-- Repository: `https://github.com/anunrs/component-usage-checker`
-- Structure: Monorepo — one repo, `backend/` and `frontend/` as subfolders
-- Remote connection: HTTPS
-- Branch: `main`
-
-**Important gotcha — CRA creates its own `.git` folder:**
-`create-react-app` initialises a git repository inside the `frontend/` folder automatically. When trying to add `frontend/` to the parent repo, Git treats it as a submodule and refuses to include its contents normally. The fix was to delete `frontend/.git` before the first commit, then force-remove the cached submodule reference with `git rm --cached -f frontend` and re-stage everything.
-
-**`.gitignore` excludes:**
-- `node_modules/` (backend and frontend)
-- `.env` (backend and frontend)
-- `dist/` (compiled TypeScript output)
-- `src/generated/` (Prisma generated client — regenerated on deploy)
-- `src/uploads/` (local upload temp folder)
-- `build/` (CRA production build output)
-
----
-
-## Local Development
-
-### Prerequisites
-- Node.js 18+
-- A Supabase project with the session pooler connection string
-
-### Backend
-```bash
-cd backend
-npm install           # also runs postinstall → prisma generate
-npx prisma migrate dev --name init   # creates tables in Supabase
-npm run dev           # starts nodemon + ts-node on port 3000
-```
-
-### Frontend
-```bash
-cd frontend
-npm install
-npm start             # starts CRA dev server on port 3001
-```
-
-The frontend reads `REACT_APP_API_URL` from `frontend/.env`. If not set, it falls back to `http://localhost:3000` (the backend dev server).
+CRA app with Tailwind via CDN. Auto-deploys on push to `main`. Both backend and frontend are separate Vercel projects pointing at different root directories of the same monorepo.
 
 ---
 
 ## Known Gotchas & Decisions
 
-**Prisma v7 adapter requirement:**
-Prisma v7 no longer includes a built-in database driver. You must install `@prisma/adapter-pg` and `pg` and pass an adapter instance to `PrismaClient`. The old `new PrismaClient()` with no arguments no longer connects to anything.
+**Reachability is conservative by default:**
+If no entry point file can be detected (e.g. the zip doesn't contain `src/index.tsx` or `src/main.tsx`), `buildReachabilitySet` returns `null` and all components default to `reachable: true`. Better to show everything as potentially live than to incorrectly nuke live components.
 
+**Reachability runs on the filtered zip:**
+The client-side JSZip filter strips non-TypeScript files before upload. `graphBuilder` only ever sees `.ts`/`.tsx` files — it can't follow imports into `.js` or `.css` files. If a project's entry point is a `.js` file, it won't be detected. This is a known limitation for non-TypeScript projects (which aren't the target audience anyway).
+
+**Type-annotated `export const` was the biggest miss in v1:**
+`export const Button: React.FC<Props> = ...` has a `:` between the name and `=`. The original pattern `\s*=` never matched. Changed to `\s*[:=]` which accepts either `=` (direct assignment) or `:` (type annotation). This was the primary reason many TypeScript-heavy components were invisible to the scanner.
+
+**`export default Identifier` is extremely common:**
+```ts
+const MyComponent = () => { ... };
+export default MyComponent;
+```
+This pattern — declare first, export separately — was not detected in v1. Negative lookahead `(?![.(a-zA-Z0-9_])` is used to prevent capturing `React` from `export default React.memo(...)` or HOC names from `export default withRouter(...)`.
+
+**Combined imports require separate parsing:**
+`import Button, { IconLeft } from '../components'` — the original regex used exclusive OR and only captured either the default OR the named imports. Restructured to strip the `{ ... }` block to get the default, then extract the `{ ... }` block separately.
+
+**Aliased imports must resolve to the export name:**
+`import { Button as Btn }` — if we store `"Btn"` as the imported name, it never matches the definition `"Button"`. The correct behaviour is to store `"Button"` (the original export name). This ensures the usage map correctly attributes the import to the component definition.
+
+**`.d.ts` files must be excluded:**
+Declaration files end in `.d.ts` which also ends in `.ts`. Without explicit exclusion, `vite-env.d.ts`, `global.d.ts`, and bundled library declarations generate false component entries from patterns like `export declare const MyThing`.
+
+**Global regex `lastIndex` must be reset:**
+Both `importParser` and `graphBuilder` use global regexes. After each file is processed, `PATTERN.lastIndex = 0` must be called. Without this, the next file's search starts from a non-zero position and matches are silently missed.
+
+**Unreachable importers must not inflate labels:**
+If `FederationList` (unreachable) imports `ColorContext` (core), that import is dead code. Without filtering, `ColorContext` might show 15 imports but only 8 of them are from live files — making it appear more embedded than it is. The fix: for reachable components, `usedIn` is filtered to only include files that are themselves reachable.
+
+**Portal prevents modal flicker:**
+ComponentCard has `hover:-translate-y-0.5`. If the graph modal renders inside the card's DOM tree, mouse movement over the card while the modal is open retriggers the hover transform, causing the modal to shift/flicker. `ReactDOM.createPortal(modal, document.body)` breaks the DOM relationship — the modal renders at body level and is immune to any transform on its logical parent.
+
+**Prisma v7 adapter requirement:**
 ```ts
 const pool = new Pool({ connectionString: process.env.DATABASE_URL!, ssl: { rejectUnauthorized: false } });
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 ```
+`new PrismaClient()` with no arguments doesn't connect to anything in v7.
 
-**SSL with Supabase — `rejectUnauthorized: false` must be on the Pool, not the URL:**
-Supabase uses a certificate from a CA that is not in Node's default trust store. Setting `ssl: { rejectUnauthorized: false }` tells Node to accept the certificate chain without verifying it. This must be set on the `pg.Pool` config object. If `?sslmode=require` is added to the `DATABASE_URL` string instead, the newer `pg` library treats it as strict certificate verification (`verify-full`), which overrides the Pool's ssl config and causes `self-signed certificate in certificate chain` errors. The solution is to remove `?sslmode=require` from the URL and rely solely on the Pool config.
-
-**Global regex `lastIndex` must be reset:**
-The import parser regex uses the `g` flag. JavaScript global regexes maintain state between calls via `lastIndex`. After each file is parsed, `IMPORT_PATTERN.lastIndex = 0` must be called. Without this, parsing the second and subsequent files starts from a non-zero position and silently misses imports.
-
-**Label is not stored in the database:**
-The `label` field is computed on the frontend from `usageCount`. Storing a derived value in the database would mean needing a migration if thresholds change. Since `usageCount` is always stored, the label can always be recalculated.
-
-**CORS `ALLOWED_ORIGINS` env var:**
-The backend reads `ALLOWED_ORIGINS` as a comma-separated string and splits it into an array. This means both local and production origins can be whitelisted without touching code. When updating this on Vercel, the backend project must be redeployed for the new env var to take effect.
-
-**`https://` must be included in all URLs:**
-When setting `REACT_APP_API_URL` and `ALLOWED_ORIGINS` in Vercel, the protocol (`https://`) must be included. Without it, the frontend constructs malformed request URLs (appending the API URL as a path segment of the current host) and CORS origin matching fails.
+**SSL: `rejectUnauthorized: false` on Pool, not in URL:**
+`?sslmode=require` in the DATABASE_URL causes `pg` to treat it as `verify-full`, overriding the Pool ssl config. Remove it from the URL and rely solely on `ssl: { rejectUnauthorized: false }` on the Pool object.
 
 **Monorepo + Vercel = two separate Vercel projects:**
-Even though backend and frontend live in the same GitHub repo, they are two completely separate Vercel projects, each configured with a different Root Directory. Renaming them in Vercel's project settings (to `component-usage-checker-backend` and `component-usage-checker-frontend`) is cosmetic only — it doesn't affect deployment.
+Same GitHub repo, different Root Directory settings. Both auto-deploy on push to `main`.
 
-**No keep-alive needed (unlike API Drift Observatory):**
-Since this project uses Vercel serverless instead of Render's free tier, there is no spin-down problem. Vercel functions wake up in milliseconds on demand. UptimeRobot is not needed.
+**`https://` must be in all URL env vars:**
+`REACT_APP_API_URL` and `ALLOWED_ORIGINS` must include the protocol. Without `https://`, the frontend builds malformed request URLs and CORS origin matching fails.
+
+**CRA creates its own `.git` folder:**
+`create-react-app` initialises a git repo inside `frontend/`. Fix: `rm -rf frontend/.git`, then `git rm --cached -f frontend`, re-stage.
+
+**Label is not stored in the database:**
+Computed at render time from `usageCount`. No migration needed if thresholds change.
+
+**No keep-alive needed:**
+Vercel serverless wakes in milliseconds. No UptimeRobot or ping service required (unlike Render free tier).
